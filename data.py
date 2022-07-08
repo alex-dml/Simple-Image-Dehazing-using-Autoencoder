@@ -1,199 +1,113 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Wed Aug  4 17:03:51 2021
-
-@author: duminil
-"""
-from tensorflow import keras
-import cv2 as cv
-import glob
 import numpy as np
 import os
-import random
-import keras_preprocessing
-import cv2
-import pandas as pd
+from tensorflow import keras
+from sklearn.utils import shuffle
 from tensorflow.python.keras.utils.data_utils import Sequence
-from model import get_model, create_model
-from tensorflow.keras.optimizers import Adam
-from utils import vid_to_frame
+import cv2
 
-class VideoFrameGenerator(Sequence):
-    '''
-        Video frame generator generates batch of frames from a video directory
-            videos/class1/file1.avi
-            videos/class1/file2.avi
-            videos/class2/file3.avi
-    '''
-    def __init__(self,
-                 from_dir,
-                 dataset,
-                 batch_size=4,
-                 shape=(480, 640, 3),
-                 nbframe=8,
-                 shuffle=False,
-                 transform:keras.preprocessing.image.ImageDataGenerator=None
-                ):
-        
-        self.from_dir = from_dir
-        self.dataset = dataset
-        self.nbframe = nbframe
-        self.batch_size = batch_size
-        self.target_shape = shape
-        self.shuffle = shuffle
-        self.transform = transform
-        
-        # the list of classes, built in __list_all_files
-        self.files = []
-        self.dataH = []
-        self.dataC = []
-        
-        # prepare the list
-        self.__filecount = 0
-        self.__list_all_files()
-        
-    def __len__(self):
-        """ Length of the generator
-        Warning: it gives the number of loop to do, not the number of files or
-        frames. The result is number_of_video/batch_size. You can use it as
-        `step_per_epoch` or `validation_step` for `model.fit_generator` parameters.
-        """
-        return self.__filecount//self.batch_size
+def _resize(img, resolution=480, padding=6):
+    from skimage.transform import resize
+    return resize(img, (resolution, int(resolution*4/3)), preserve_range=True, mode='reflect', anti_aliasing=True )
+
     
+def get_Image_data(training_path, valid_path, test_path, batch_size, shape_img):
+    
+    # training data
+    hazy_train_dir = os.listdir(os.path.join(training_path,'hazy'))
+    hazy_data = [os.path.join(training_path,'hazy',img) for img in hazy_train_dir]
+    gt_data = training_path + 'gt/'
+    
+    train_generator = ImageGenerator2(hazy_train_dir, training_path, batch_size, shape_img, transformation=False)
+    
+    # validation 
+    hazy_val_dir = os.listdir(os.path.join(valid_path,'hazy'))
+    hazy_data = [os.path.join(valid_path,'hazy',img) for img in hazy_val_dir]
+    gt_data = valid_path + 'gt/'
+
+    valid_generator = ImageGenerator2(hazy_val_dir, valid_path, batch_size, shape_img, transformation=False)
+    
+    # test 
+    hazy_test_dir = os.listdir(os.path.join(test_path,'hazy'))
+    hazy_data = [os.path.join(test_path,'hazy',img) for img in hazy_test_dir]
+    gt_data = test_path + 'gt/'
+
+    test_generator = ImageGenerator2(hazy_test_dir, test_path, batch_size, shape_img, transformation=False)
+    
+    return train_generator, valid_generator, test_generator
+
+
+class ImageGenerator2(Sequence):
+    'Generates data for Keras'
+    def __init__(self,
+                 list_ID_hazy,
+                 path_to_data, 
+                 batch_size, 
+                 shape_img=(256,256,3), 
+                 crop_shape=(128,128,3),
+                 transformation=False,
+                 shuffle = False
+                 ):
+        'Initialization'
+        self.list_ID_hazy = list_ID_hazy
+        self.path_to_data = path_to_data
+        # self.gt_path = gt_path
+        self.batch_size = batch_size
+        self.shape_img = shape_img
+        self.crop_shape = crop_shape
+        self.transformation = transformation
+        self.shuffle = shuffle
+     
+        
+        self.batch_size = batch_size
+
+        # self.list_IDs = list_IDs
+        self.shuffle = shuffle
+        self.on_epoch_end()
+
+    def __len__(self):
+        'Denotes the number of batches per epoch'
+        return int(np.floor(len(self.list_ID_hazy) / self.batch_size))
+
     def __getitem__(self, index):
-        """ Generator needed method - return a batch of `batch_size` video
-        block with `self.nbframe` for each
-        """
-        T = None
-        if self.transform:
-            T = self.transform.get_random_transform(self.target_shape[:2])
-            
-        indexes_x = self.dataH[index*self.batch_size:(index+1)*self.batch_size]
-        indexes_y = self.dataC[index*self.batch_size:(index+1)*self.batch_size]
+        'Generate one batch of data'
+        # Generate indexes of the batch
+        indexes = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
         
-        X, Y = [], []
-        for vH, vC in zip(indexes_x, indexes_y): 
-            
-            x = vH
-            y = vC
-            temp_data_list1 = []
-            temp_data_list2 = []
-            
-            for i, j in zip (x, y):
-                # load data in x and y
-                try:
-                    if T:
-                        temp_data_list1.append(self.transform.apply_transform(i, T))
-                        temp_data_list2.append(self.transform.apply_transform(j, T))
-                    else:
-                        temp_data_list1.append(i)
-                        temp_data_list2.append(j)
-                    
-                except Exception as e:
-                    print (e)
-                    print ('error reading file: ', i) 
-                    print ('error reading file: ', j) 
-                    
-                
-            X.append(temp_data_list1)
-            Y.append(temp_data_list2)
-            
-        X = np.array(X)
-        Y = np.array(Y)
-        
-        # print("X shape", X.shape)
-        # print("Y shape", Y.shape)
+        # Find list of IDs
+        list_IDs_temp = [self.list_ID_hazy[k] for k in indexes]
+        # print(list_IDs_temp)
+        # Generate data
+        X, Y = self.__data_generation(list_IDs_temp)
 
         return X, Y
+
+    def on_epoch_end(self):
+        'Updates indexes after each epoch'
+        self.indexes = np.arange(len(self.list_ID_hazy))
+        if self.shuffle == True:
+            np.random.shuffle(self.indexes)
+
+    def __data_generation(self, list_IDs_temp):
+        'Generates data containing batch_size samples' # X : (n_samples, *dim, n_channels)
+        # Initialization
+        haze, clear = np.zeros( self.shape_img ), np.zeros( self.shape_img )
+
+        # Generate data
+        for i, ID in enumerate(list_IDs_temp):
+            # Store sample
     
-    
-    def __list_all_files(self):
-        """ List and inject images in memory """
-        self.__filecount = len(glob.glob(os.path.join(self.from_dir)))
+            x = cv2.imread(self.path_to_data + 'hazy/' + ID)/255.0
         
-        print(self.__filecount//self.batch_size)
-        
-        files = glob.glob(self.from_dir)
-        
-        i = 1
-        for file in files:
-            print('\rProcessing file %d/%d' % (i, self.__filecount), end='')
-            i += 1
-            # print(file)
-            self.__openframe(file)
-                  
-        # if self.shuffle:
-        #     random.shuffle(self.data)
-            
-            
-    def __openframe(self, file):
-        """Append ORIGNALS frames in memory, transformations are made on the fly"""
-        framesH = []
-        framesC = []
-        
-        # open csv file
-        tmp_df = pd.read_csv(file)
-        liste_de_frames = tmp_df.values.tolist()
-       
-        for i in liste_de_frames :
-            
-            path_H = i[0]
-            path_C = i[1]
-            # print(self.dataset.rstrip('*') + path_C.rsplit('nyu_CSV/', 1)[1])
-            
-            frameC = cv2.imread(self.dataset.rstrip('*') + path_C.rsplit('nyu_CSV/', 1)[1])
-            frameH = cv2.imread(self.dataset.rstrip('*') + path_H.rsplit('nyu_CSV/', 1)[1])
-            
-            frameC = frameC/255
-            frameH = frameH/255
+            id_ = ID.split('_')[0]
 
-            framesH.append(frameH)
-            framesC.append(frameC)
-            
-            # print(framesH)
-                
-        if len(framesH) != len(framesC):
-            print("error number of frameC and frameH not equal") 
-        
-        step = len(framesC)//self.nbframe
-        
-        framesC = framesC[::step]
-        framesH = framesH[::step]
-        
-        if len(framesC) >= self.nbframe:
-            framesC = framesC[:self.nbframe]
-            
-        if len(framesH) >= self.nbframe:
-            framesH = framesH[:self.nbframe]
-        
-        # add frames in memory
-        if len(framesH) == self.nbframe:
-            self.dataH.append(framesH)
-        else:
-            print('\n/%s has not enough frames ==> %d' % (file, len(framesH)))
-            
-        # add frames in memory
-        if len(framesC) == self.nbframe:
-            self.dataC.append(framesC)
-        else:
-            print('\n/%s has not enought frames ==> %d' % (file, len(framesC)))
-        
-path1 = 'Z:/AE/video/nyu_CSV/*'
-train_gen = VideoFrameGenerator(path1,'E:/nyu_HazyClear/*',
-            batch_size=4,
-            nbframe=8,
-            transform=None)
-# keras.preprocessing.image.ImageDataGenerator(rotation_range=5, horizontal_flip=True)
+            if not 'SOTS' in self.path_to_data:
+                clear_name = os.path.basename(id_) + '.jpg'
+            else: 
+                clear_name = os.path.basename(id_) + '.png'
 
-model = create_model()
-optimizer = Adam(lr=0.0001, amsgrad=True)
-model.compile(loss=['mse'], optimizer=optimizer, metrics=['accuracy'])
-model.summary()
-model.fit(train_gen, steps_per_epoch = 284//4, epochs=3, shuffle = False)
+            y = cv2.imread(self.path_to_data + 'gt/' + clear_name)/255.0
+            
+            haze[i] =  _resize(x, 480)
+            clear[i] = _resize(y, 480)
 
-# test video
-vid_path = 'Z:/videos_brume/fog.mp4'
-dest_folder_path = 'Z:/AE/video/data/frames/'
-path_to_frame = vid_to_frame(vid_path, dest_folder_path)
-
-data = model.predict(path_to_frame)
+        return np.array(haze), np.array(clear)
