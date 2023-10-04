@@ -58,10 +58,7 @@ class ImageGenerator2(Sequence):
         self.shuffle = shuffle
      
         
-        self.batch_size = batch_size
 
-        # self.list_IDs = list_IDs
-        self.shuffle = shuffle
         self.on_epoch_end()
 
     def __len__(self):
